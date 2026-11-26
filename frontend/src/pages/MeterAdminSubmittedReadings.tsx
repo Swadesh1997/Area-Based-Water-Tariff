@@ -1,0 +1,361 @@
+import { Table, TableBody, TableCell, TableHead, TableHeader, TableRow } from '../components/ui/table';
+import { Badge } from '../components/ui/badge';
+import { useMemo, useState } from 'react';
+import { useLanguage } from '../context/LanguageContext';
+import { getStaticTranslation } from '../constants/staticTranslations';
+import { api } from '../services/api';
+import { useApiQuery, useAdminId } from '../hooks/useApiQuery';
+import { LoadingSpinner } from '../components/common/LoadingSpinner';
+import { Input } from '../components/ui/input';
+import { Dropdown } from '../components/ui/Dropdown';
+import { Button } from '../components/ui/button';
+import { Search, X } from 'lucide-react';
+
+export function MeterAdminSubmittedReadings() {
+  const { language } = useLanguage();
+  const t = (key: string) => getStaticTranslation(language, key);
+  const adminId = useAdminId();
+  const [statusFilter, setStatusFilter] = useState<string>('all');
+  const [searchQuery, setSearchQuery] = useState<string>('');
+  const [monthFilter, setMonthFilter] = useState<string>('all');
+
+  // Fetch all consumption entries
+  const { data: consumptions = [], isLoading: consumptionsLoading } = useApiQuery(
+    ['consumption'],
+    () => api.consumption.getAll()
+  );
+
+  // Fetch all users to map userId/account to user details
+  const { data: users = [], isLoading: usersLoading } = useApiQuery(
+    ['users'],
+    () => api.users.getAll()
+  );
+
+  // Fetch all meters to get meter numbers
+  const { data: meters = [], isLoading: metersLoading } = useApiQuery(
+    ['meters'],
+    () => api.meters.getAll()
+  );
+
+  // Filter consumptions created by current meter admin
+  const myConsumptions = useMemo(() => {
+    if (!adminId) return [];
+    return consumptions.filter(c => c.createdBy === adminId);
+  }, [consumptions, adminId]);
+
+  // Map consumptions to display format
+  const submittedReadings = useMemo(() => {
+    return myConsumptions.map((consumption) => {
+      // Find user by userAccount (UUID) or userId (number) - handle both for compatibility
+      const userAccount = (consumption as any).userAccount || (consumption as any).account;
+      const userId = consumption.userId;
+      
+      const user = users.find((u) => {
+        // Match by account UUID string
+        if (userAccount && u.account) {
+          return String(u.account) === String(userAccount);
+        }
+        // Match by numeric userId
+        if (userId && u.id) {
+          return u.id === userId || String(u.id) === String(userId);
+        }
+        return false;
+      });
+
+      // Find meter for user to get meter number
+      let meterNo = user?.meterNo || 'N/A';
+      if (meterNo === 'N/A' && user) {
+        const userAccountForMeter = user.account || userAccount;
+        const userMeter = (meters as any[]).find((m: any) => {
+          const meterAccount = m.account || m.userAccount || m.user_account;
+          return meterAccount && userAccountForMeter && String(meterAccount) === String(userAccountForMeter);
+        });
+        if (userMeter?.meterNo) {
+          meterNo = typeof userMeter.meterNo === 'number' ? userMeter.meterNo.toString() : String(userMeter.meterNo);
+        }
+      }
+
+      const billMonthDate = new Date(consumption.billMonth);
+      
+      // Get approval status from consumption
+      const approvalStatus = consumption.approvalStatus;
+      let statusName = 'Pending';
+      
+      if (typeof approvalStatus === 'string') {
+        statusName = approvalStatus;
+      } else if (approvalStatus && typeof approvalStatus === 'object') {
+        statusName = approvalStatus.statusName || approvalStatus.name || 'Pending';
+      }
+      
+      // Map status to display format
+      const status = statusName === 'Approved' ? 'Approved' :
+                     statusName === 'Rejected' ? 'Rejected' :
+                     statusName === 'Pending' ? 'Pending' :
+                     'Pending';
+      
+      // Ensure currentReading is a number
+      const currentReading = typeof consumption.currentReading === 'number' 
+        ? consumption.currentReading 
+        : Number(consumption.currentReading) || 0;
+      
+      // Use consumption's createdAt as submission date
+      const submittedDate = consumption.createdAt 
+        ? new Date(consumption.createdAt)
+        : billMonthDate;
+      
+      return {
+        id: consumption.id,
+        consumptionId: consumption.id,
+        batchId: `READING-${consumption.id}`,
+        householdName: user?.fullName || user?.name || 'Unknown',
+        meterNo: meterNo,
+        reading: currentReading.toFixed(2),
+        month: billMonthDate.toLocaleDateString('en-US', { year: 'numeric', month: 'long' }),
+        submitted: submittedDate.toLocaleString('en-US', {
+          year: 'numeric',
+          month: 'short',
+          day: 'numeric',
+          hour: '2-digit',
+          minute: '2-digit',
+          second: '2-digit',
+        }),
+        submittedTimestamp: submittedDate.getTime(),
+        status: status,
+      };
+    })
+    .sort((a, b) => {
+      // Sort by submission date descending (newest first)
+      return b.submittedTimestamp - a.submittedTimestamp;
+    });
+  }, [myConsumptions, users, meters]);
+
+  // Get unique months for filter
+  const uniqueMonths = useMemo(() => {
+    const months = new Set(submittedReadings.map(r => r.month));
+    return Array.from(months).sort((a, b) => {
+      // Sort months chronologically
+      const dateA = new Date(a);
+      const dateB = new Date(b);
+      return dateB.getTime() - dateA.getTime();
+    });
+  }, [submittedReadings]);
+
+  // Apply filters
+  const filteredReadings = useMemo(() => {
+    return submittedReadings.filter((reading) => {
+      // Status filter
+      if (statusFilter !== 'all' && reading.status !== statusFilter) {
+        return false;
+      }
+
+      // Month filter
+      if (monthFilter !== 'all' && reading.month !== monthFilter) {
+        return false;
+      }
+
+      // Search query filter
+      if (searchQuery.trim()) {
+        const query = searchQuery.toLowerCase();
+        const matchesSearch = 
+          reading.batchId?.toLowerCase().includes(query) ||
+          reading.householdName?.toLowerCase().includes(query) ||
+          reading.meterNo?.toLowerCase().includes(query) ||
+          reading.reading?.toLowerCase().includes(query) ||
+          reading.month?.toLowerCase().includes(query);
+        if (!matchesSearch) {
+          return false;
+        }
+      }
+
+      return true;
+    });
+  }, [submittedReadings, statusFilter, monthFilter, searchQuery]);
+
+  // Check if any filters are active
+  const hasActiveFilters = statusFilter !== 'all' || monthFilter !== 'all' || searchQuery.trim() !== '';
+
+  // Clear all filters
+  const clearFilters = () => {
+    setStatusFilter('all');
+    setMonthFilter('all');
+    setSearchQuery('');
+  };
+
+  const getStatusBadge = (status: string) => {
+    switch (status) {
+      case 'Approved':
+        return (
+          <Badge className="bg-green-50 text-green-700 border-green-200">
+            Approved
+          </Badge>
+        );
+      case 'Rejected':
+        return (
+          <Badge className="bg-red-50 text-red-700 border-red-200">
+            Rejected
+          </Badge>
+        );
+      case 'Pending':
+        return (
+          <Badge className="bg-yellow-50 text-yellow-700 border-yellow-200">
+            Pending
+          </Badge>
+        );
+      default:
+        return (
+          <Badge className="bg-gray-50 text-gray-700 border-gray-200">
+            {status}
+          </Badge>
+        );
+    }
+  };
+
+  if (consumptionsLoading || usersLoading || metersLoading) {
+    return (
+      <div className="min-h-screen bg-app flex items-center justify-center">
+        <LoadingSpinner />
+      </div>
+    );
+  }
+
+
+  return (
+    <div className="min-h-screen bg-app">
+      <div className="px-4 md:px-8 py-4 md:py-6">
+        {/* Header with inline stats - centered on mobile to avoid hamburger overlap */}
+        <div className="mb-6 md:mb-8">
+          <div className="flex flex-col md:flex-row md:items-center md:justify-between gap-4 items-center text-center md:text-left">
+            <div>
+              <h1 className="text-xl md:text-[1.75rem] font-semibold text-gray-900 mb-1 notranslate" translate="no">{t('pages.readingHistoryTitle')}</h1>
+              <p className="text-xs md:text-sm text-gray-500">View history of all meter readings you have created</p>
+            </div>
+            <div className="flex items-center gap-4 md:gap-6 text-sm flex-wrap justify-center md:justify-start">
+              <div className="flex items-center gap-2">
+                <span className="text-gray-600">Total:</span>
+                <span className="font-semibold text-gray-900">{filteredReadings.length}</span>
+              </div>
+              <span className="text-gray-300 hidden sm:inline">|</span>
+              <div className="flex items-center gap-2">
+                <span className="text-gray-600">Approved:</span>
+                <span className="font-semibold text-green-600">{filteredReadings.filter(r => r.status === 'Approved').length}</span>
+              </div>
+              <span className="text-gray-300 hidden sm:inline">|</span>
+              <div className="flex items-center gap-2">
+                <span className="text-gray-600">Pending:</span>
+                <span className="font-semibold text-yellow-600">{filteredReadings.filter(r => r.status === 'Pending').length}</span>
+              </div>
+              <span className="text-gray-300 hidden sm:inline">|</span>
+              <div className="flex items-center gap-2">
+                <span className="text-gray-600">Rejected:</span>
+                <span className="font-semibold text-red-600">{filteredReadings.filter(r => r.status === 'Rejected').length}</span>
+              </div>
+            </div>
+          </div>
+        </div>
+
+        {/* Filters */}
+        <div className="mb-6 flex flex-col sm:flex-row flex-wrap items-stretch sm:items-center gap-3">
+          {/* Search Bar */}
+          <div className="relative flex-1 min-w-0 w-full sm:max-w-md">
+            <Search className="absolute left-3 top-1/2 -translate-y-1/2 text-gray-400 shrink-0" size={18} />
+            <Input
+              type="text"
+              placeholder="Search by name, meter no, reading ID..."
+              value={searchQuery}
+              onChange={(e) => setSearchQuery(e.target.value)}
+              className="pl-10 w-full min-w-0 bg-white border-gray-300 rounded-lg h-11 focus:ring-2 focus:ring-primary/20 focus:border-blue-500"
+            />
+          </div>
+
+          {/* Status Filter */}
+          <div className="w-full sm:w-48 min-w-0">
+            <Dropdown
+              options={[
+                { value: 'all', label: 'All Status' },
+                { value: 'Approved', label: 'Approved' },
+                { value: 'Pending', label: 'Pending' },
+                { value: 'Rejected', label: 'Rejected' }
+              ]}
+              value={statusFilter}
+              onChange={setStatusFilter}
+              placeholder="Filter by Status"
+              className="bg-white border-gray-300 rounded-lg focus:ring-2 focus:ring-primary/20 focus:border-blue-500 w-full"
+            />
+          </div>
+
+          {/* Month Filter */}
+          {uniqueMonths.length > 0 && (
+            <div className="w-full sm:w-48 min-w-0">
+              <Dropdown
+                options={[
+                  { value: 'all', label: 'All Months' },
+                  ...uniqueMonths.map(month => ({ value: month, label: month }))
+                ]}
+                value={monthFilter}
+                onChange={setMonthFilter}
+                placeholder="Filter by Month"
+                className="bg-white border-gray-300 rounded-lg focus:ring-2 focus:ring-primary/20 focus:border-blue-500 w-full"
+              />
+            </div>
+          )}
+
+          {/* Clear Filters Button */}
+          {hasActiveFilters && (
+            <Button
+              variant="outline"
+              onClick={clearFilters}
+              className="h-11 px-4 border-gray-300 hover:bg-gray-50 w-full sm:w-auto shrink-0"
+            >
+              <X size={16} className="mr-2" />
+              Clear Filters
+            </Button>
+          )}
+        </div>
+
+        {/* Table */}
+        <div>
+          <div className="bg-white rounded-xl border border-gray-200 overflow-hidden">
+            <div className="overflow-x-auto -mx-4 md:mx-0">
+              <div className="inline-block min-w-full align-middle px-4 md:px-0">
+                <Table>
+                  <TableHeader>
+                    <TableRow className="border-gray-200 bg-gray-50">
+                      <TableHead className="text-sm font-semibold text-gray-700 min-w-[100px] hidden sm:table-cell">Reading ID</TableHead>
+                      <TableHead className="text-sm font-semibold text-gray-700 min-w-[120px]">Household Name</TableHead>
+                      <TableHead className="text-sm font-semibold text-gray-700 min-w-[90px] hidden sm:table-cell">Meter No</TableHead>
+                      <TableHead className="text-sm font-semibold text-gray-700 min-w-[90px]">Reading (m³)</TableHead>
+                      <TableHead className="text-sm font-semibold text-gray-700 min-w-[100px]">Bill Month</TableHead>
+                      <TableHead className="text-sm font-semibold text-gray-700 min-w-[120px] hidden md:table-cell">Submitted</TableHead>
+                      <TableHead className="text-sm font-semibold text-gray-700 min-w-[90px]">Status</TableHead>
+                    </TableRow>
+                  </TableHeader>
+                  <TableBody>
+                    {filteredReadings.length === 0 ? (
+                      <TableRow>
+                        <TableCell colSpan={7} className="text-center text-gray-500 py-8">
+                          No readings found. Add readings from the Meter Data Entry page.
+                        </TableCell>
+                      </TableRow>
+                    ) : (
+                      filteredReadings.map((reading) => (
+                        <TableRow key={reading.id} className="border-gray-100">
+                          <TableCell className="text-sm text-gray-600 font-mono hidden sm:table-cell">{reading.batchId}</TableCell>
+                          <TableCell className="text-sm text-gray-900 font-medium">{reading.householdName}</TableCell>
+                          <TableCell className="text-sm text-gray-600 font-mono hidden sm:table-cell whitespace-nowrap">{reading.meterNo}</TableCell>
+                          <TableCell className="text-sm text-gray-600 whitespace-nowrap">{reading.reading} m³</TableCell>
+                          <TableCell className="text-sm text-gray-600">{reading.month}</TableCell>
+                          <TableCell className="text-sm text-gray-600 hidden md:table-cell">{reading.submitted}</TableCell>
+                          <TableCell>{getStatusBadge(reading.status)}</TableCell>
+                        </TableRow>
+                      ))
+                    )}
+                  </TableBody>
+                </Table>
+              </div>
+            </div>
+          </div>
+        </div>
+      </div>
+    </div>
+  );
+}

@@ -1,0 +1,15 @@
+.env
+.env.*
+!.env.example
+node_modules/
+dist/
+build/
+coverage/
+.DS_Store
+# Real billing, customer and meter data must never be committed
+data/
+*.csv
+*.xlsx
+*.xlsm
+*.rar
+*.zip

@@ -1,0 +1,879 @@
+import { Table, TableBody, TableCell, TableHead, TableHeader, TableRow } from '../components/ui/table';
+import { Button } from '../components/ui/button';
+import { Eye } from 'lucide-react';
+import { useState, useMemo } from 'react';
+import { useLanguage } from '../context/LanguageContext';
+import { getStaticTranslation } from '../constants/staticTranslations';
+import { ReviewChangeModal } from './ReviewChangeModal';
+import { api } from '../services/api';
+import { useApiQuery, useApiMutation, useAdminId } from '../hooks/useApiQuery';
+import { LoadingSpinner } from '../components/common/LoadingSpinner';
+import type { Consumption, ZoneScoringRuleSet, User, Area, Zone, Meter } from '../types';
+import { useQueryClient } from '@tanstack/react-query';
+import { toast } from 'sonner';
+import { mapUserToCustomer } from '../utils/dataMappers';
+
+// Unified display item type for approval queue
+interface ApprovalQueueItem {
+  id: string;
+  module: string;
+  requestedBy: string;
+  request: string;
+  status: string;
+  recordId: number;
+  recordType: 'consumption' | 'zone-scoring' | 'customer';
+  oldData?: unknown;
+  newData?: unknown;
+  account?: string; // UUID for customer records
+  details?: string; // Context-specific description
+  affectedEntity?: string; // Secondary info about what's affected
+}
+
+export function ApprovalQueue() {
+  const { language } = useLanguage();
+  const t = (key: string) => getStaticTranslation(language, key);
+  const [selectedRequest, setSelectedRequest] = useState<ApprovalQueueItem | null>(null);
+  const [isLoadingRecordData, setIsLoadingRecordData] = useState(false);
+  const adminId = useAdminId();
+  const queryClient = useQueryClient();
+
+  // Fetch pending consumptions (filtered by API)
+  const { data: allConsumptions = [], isLoading: consumptionsLoading } = useApiQuery(
+    ['consumption', 'pending'],
+    () => api.consumption.getAll({ approvalStatus: 'Pending' })
+  );
+
+  // Fetch all admins to map requestedBy IDs to names
+  const { data: admins = [] } = useApiQuery(
+    ['admins'],
+    () => api.admins.getAll()
+  );
+
+  // Fetch ZoneScoring rulesets with pending status
+  const { data: zoneScoringData = [] } = useApiQuery<ZoneScoringRuleSet[]>(
+    ['zone-scoring'],
+    () => api.zoneScoring.getAll()
+  );
+  const pendingZoneScoringRulesets = useMemo(() => {
+    return (zoneScoringData as ZoneScoringRuleSet[]).filter(
+      (ruleset) => ruleset.status?.toLowerCase() === 'pending'
+    );
+  }, [zoneScoringData]);
+
+  // Fetch all users; queue shows those with Pending approval status
+  const { data: allUsers = [], isLoading: usersLoading } = useApiQuery<User[]>(
+    ['users'],
+    () => api.users.getAll()
+  );
+
+  // Fetch areas and zones to get zone information for customers
+  const { data: allAreas = [] } = useApiQuery<Area[]>(
+    ['areas'],
+    () => api.area.getAll()
+  );
+
+  const { data: allZones = [] } = useApiQuery<Zone[]>(
+    ['zones'],
+    () => api.zones.getAll()
+  );
+
+  // Fetch all meters to match with users
+  const { data: allMeters = [] } = useApiQuery<Meter[]>(
+    ['meters'],
+    () => api.meters.getAll()
+  );
+
+  // Customers awaiting approval: backend "Draft" (or Pending), exclude already approved (activeStatus Active)
+  const pendingCustomers = useMemo(() => {
+    return (allUsers as User[]).filter((user: User) => {
+      const userData = user as any;
+      const activeLower = (userData.activeStatus && String(userData.activeStatus).toLowerCase()) || '';
+      if (activeLower === 'active') return false; // already approved
+      const status = userData.approvalStatus ?? userData.status ?? user.status;
+      const s = status && typeof status === 'string' ? status : (typeof status === 'object' && status !== null ? (status as { statusName?: string; name?: string }).statusName ?? (status as { statusName?: string; name?: string }).name : '');
+      const lower = s ? String(s).toLowerCase() : '';
+      return lower === 'pending' || lower === 'draft';
+    });
+  }, [allUsers]);
+
+  // Filter pending consumptions
+  const pendingConsumptions = useMemo(() => {
+    return allConsumptions.filter((c: Consumption) => {
+      // Check approvalStatus in multiple formats (string or object)
+      const approvalStatus = c.approvalStatus;
+      if (!approvalStatus) return false;
+      
+      // Handle string format
+      if (typeof approvalStatus === 'string') {
+        return approvalStatus.toLowerCase() === 'pending';
+      }
+      
+      // Handle object format
+      if (typeof approvalStatus === 'object' && approvalStatus !== null) {
+        const statusObj = approvalStatus as { statusName?: string; name?: string };
+        const statusName = statusObj.statusName || statusObj.name;
+        return statusName && typeof statusName === 'string' && statusName.toLowerCase() === 'pending';
+      }
+      
+      return false;
+    });
+  }, [allConsumptions]);
+
+  // Combine all pending items into unified display format
+  const displayRequests = useMemo(() => {
+    const items: ApprovalQueueItem[] = [];
+
+    // Add pending consumptions
+    pendingConsumptions.forEach((consumption: Consumption) => {
+      const creator = admins.find((a) => a.id === consumption.createdBy);
+      // Find user/customer for this consumption (handle both userId and userAccount)
+      const customer = (allUsers as User[]).find((u: User) => {
+        if (consumption.userId) {
+          return u.id === consumption.userId;
+        }
+        if (consumption.userAccount) {
+          return u.account === consumption.userAccount || String(u.account) === String(consumption.userAccount);
+        }
+        return false;
+      });
+      const customerName = customer?.fullName || customer?.name || 
+        (consumption.userId ? `Customer #${consumption.userId}` : 
+         consumption.userAccount ? `Customer ${consumption.userAccount}` : 'Unknown Customer');
+      
+      // Find meter for customer
+      const customerMeter = (allMeters as Meter[]).find((m: Meter) => {
+        if (customer) {
+          const meterAccount = (m as any).account || m.userAccount || (m as any).user_account;
+          const customerAccount = customer.account || consumption.userAccount || consumption.account;
+          return meterAccount && customerAccount && String(meterAccount) === String(customerAccount);
+        }
+        return false;
+      });
+      
+      const userAccount = consumption.userAccount || (consumption as any).account || customer?.account;
+      items.push({
+        id: `CONSUMPTION-${consumption.id}`,
+        module: 'Consumption',
+        requestedBy: creator?.fullName || `Admin #${consumption.createdBy}`,
+        request: consumption.createdAt
+          ? new Date(consumption.createdAt).toLocaleString('en-US', {
+              year: 'numeric',
+              month: 'short',
+              day: 'numeric',
+              hour: '2-digit',
+              minute: '2-digit',
+              second: '2-digit',
+            })
+          : 'N/A',
+        status: 'Pending',
+        recordId: consumption.id,
+        recordType: 'consumption',
+        account: userAccount ? String(userAccount) : undefined,
+        details: `${consumption.billMonth} - ${customerName}`,
+        affectedEntity: `Consumption: ${consumption.consumption || 0} m³`,
+        oldData: null,
+          newData: {
+          // Consumption record details
+          consumptionId: consumption.id,
+          billMonth: consumption.billMonth,
+          currentReading: consumption.currentReading,
+          previousReading: consumption.previousReading,
+          consumption: consumption.consumption,
+          createdAt: consumption.createdAt,
+          // Customer information
+          customerName: customerName,
+          meterNo: customerMeter?.meterNo || customer?.meterNo || 'N/A',
+          // Submission information
+          submittedBy: creator?.fullName || `Admin #${consumption.createdBy}`,
+          submittedById: consumption.createdBy,
+        },
+      });
+    });
+
+    // Add pending ZoneScoring rulesets
+    pendingZoneScoringRulesets.forEach((ruleset: ZoneScoringRuleSet) => {
+      const areaCount = ruleset.scoringParams?.length || 0;
+      // Check if ruleset has createdBy field (may be in API response but not in type)
+      const rulesetWithCreator = ruleset as ZoneScoringRuleSet & { createdBy?: number; created_by?: number };
+      const creatorId = rulesetWithCreator.createdBy || rulesetWithCreator.created_by;
+      const creator = creatorId ? admins.find((a) => a.id === creatorId) : null;
+      
+      items.push({
+        id: `ZONE-SCORING-${ruleset.id}`,
+        module: 'ZoneScoring',
+        requestedBy: creator?.fullName || (creatorId ? `Admin #${creatorId}` : 'Tariff Admin'),
+        request: ruleset.createdAt
+          ? new Date(ruleset.createdAt).toLocaleString('en-US', {
+              year: 'numeric',
+              month: 'short',
+              day: 'numeric',
+              hour: '2-digit',
+              minute: '2-digit',
+              second: '2-digit',
+            })
+          : 'N/A',
+        status: 'Pending',
+        recordId: ruleset.id,
+        recordType: 'zone-scoring',
+        details: ruleset.title,
+        affectedEntity: `${areaCount} parameter${areaCount !== 1 ? 's' : ''}`,
+        oldData: null,
+        newData: {
+          title: ruleset.title,
+          description: ruleset.description,
+          parametersCount: ruleset.scoringParams?.length || 0,
+          status: ruleset.status,
+          scoringParams: ruleset.scoringParams || [],
+          createdAt: ruleset.createdAt,
+        },
+      });
+    });
+
+    // Add pending customers (approval status Pending)
+    pendingCustomers.forEach((user: User) => {
+      const userData = user as any;
+      const customerAccount = userData.account || user.id;
+      const customer = mapUserToCustomer(user);
+      const creator = admins.find((a) => a.id === (userData.createdBy || userData.created_by));
+      
+      // Get zone information from area - check nested area.zone first, then lookup
+      let zoneId = customer.zoneId;
+      if (!zoneId && customer.areaId) {
+        const area = (allAreas as Area[]).find((a) => a.id === customer.areaId);
+        if (area) {
+          // Check if area has nested zone object
+          zoneId = (area as any).zone?.id || area.zoneId;
+        }
+      }
+      
+      // Get meter data from meters table by matching account UUID
+      const userMeter = (allMeters as Meter[]).find((m: Meter) => {
+        const meterAccount = (m as any).account || m.userAccount || (m as any).user_account;
+        return meterAccount === customerAccount || meterAccount === String(customerAccount);
+      });
+      
+      // Extract meter data from matched meter or fallback to customer data
+      let meterNo = userMeter?.meterNo || customer.meterNo || '';
+      let meterStatus = userMeter?.meterStatus || customer.meterStatus || '';
+      let sizeOfDia = userMeter?.sizeOfDia || customer.sizeOfDia || '';
+      let meterInstallationDate = userMeter?.meterInstallationDate || customer.meterInstallationDate || '';
+      
+      // Format meter number if it's a number
+      const meterNoStr = meterNo 
+        ? (typeof meterNo === 'number' ? meterNo.toString() : String(meterNo))
+        : '';
+      
+      // Get createdAt from various possible locations
+      // Try multiple field names and nested locations
+      let createdAt = userData.createdAt || 
+                     userData.created_at || 
+                     (user as any).createdAt || 
+                     (user as any).created_at ||
+                     userData.dateCreated ||
+                     userData.date_created;
+      
+      // If still not found, use current date as fallback for pending requests
+      // (These are pending approval requests, so using current time is reasonable)
+      if (!createdAt) {
+        createdAt = new Date().toISOString();
+      }
+      
+      const customerName = customer.name || customer.fullName || 'Unknown Customer';
+      const inspCodeStr = customer.inspCode ? `IC-${customer.inspCode}` : '-';
+      
+      items.push({
+        id: `CUSTOMER-${customerAccount}`,
+        module: 'Customer',
+        requestedBy: creator?.fullName || 'Customer Admin',
+        request: new Date(createdAt).toLocaleString('en-US', {
+              year: 'numeric',
+              month: 'short',
+              day: 'numeric',
+              hour: '2-digit',
+              minute: '2-digit',
+              second: '2-digit',
+            }),
+        status: 'Pending',
+        recordId: typeof customerAccount === 'string' ? 0 : customerAccount, // Use 0 for UUID, actual ID for number
+        recordType: 'customer',
+        account: typeof customerAccount === 'string' ? customerAccount : undefined,
+        details: `${customerName} (${inspCodeStr})`,
+        affectedEntity: `Category: ${customer.customerCategory || 'N/A'}`,
+        oldData: null,
+        newData: {
+          name: customer.name || customer.fullName,
+          address: customer.address,
+          inspCode: customer.inspCode,
+          accountType: customer.accountType,
+          customerCategory: customer.customerCategory,
+          waterStatus: customer.waterStatus,
+          sewerStatus: customer.sewerStatus,
+          areaId: customer.areaId,
+          zoneId: zoneId || undefined,
+          meterNo: meterNoStr,
+          meterStatus: meterStatus || undefined,
+          sizeOfDia: sizeOfDia || undefined,
+          meterInstallationDate: meterInstallationDate || undefined,
+        },
+      });
+    });
+
+    // Sort by request date (newest first)
+    return items.sort((a, b) => {
+      const dateA = a.request === 'N/A' ? 0 : new Date(a.request).getTime();
+      const dateB = b.request === 'N/A' ? 0 : new Date(b.request).getTime();
+      return dateB - dateA;
+    });
+  }, [pendingConsumptions, pendingZoneScoringRulesets, pendingCustomers, admins, allAreas, allZones, allMeters]);
+
+  // Approve consumption mutation (no successMessage – handleApprove shows a single contextual toast)
+  const approveConsumptionMutation = useApiMutation(
+    ({ id, comments }: { id: number; comments?: string }) => {
+      if (!adminId) throw new Error('Admin ID not found');
+      return api.consumption.approve(id, {
+        approvedBy: adminId,
+        comments,
+      });
+    },
+    {
+      errorMessage: 'Failed to approve consumption',
+      invalidateQueries: [
+        ['consumption'],
+      ],
+    }
+  );
+
+  // Reject consumption mutation
+  const rejectConsumptionMutation = useApiMutation(
+    ({ id, comments }: { id: number; comments?: string }) => {
+      if (!adminId) throw new Error('Admin ID not found');
+      return api.consumption.reject(id, {
+        approvedBy: adminId,
+        comments,
+      });
+    },
+    {
+      successMessage: 'Consumption rejected successfully',
+      invalidateQueries: [
+        ['consumption'],
+      ],
+    }
+  );
+
+  const isLoading = consumptionsLoading || usersLoading;
+
+  const handleReview = async (request: ApprovalQueueItem) => {
+    // Always fetch customer data to ensure we have complete meter information
+    // For other modules, only fetch if data is missing
+    const shouldFetch = (request.module === 'Customer' || request.recordType === 'customer') 
+      ? true 
+      : ((!request.oldData && !request.newData) || request.newData === null || request.newData === undefined);
+    
+    if (shouldFetch) {
+      setIsLoadingRecordData(true);
+      try {
+        let newData: unknown = null;
+        
+        if (request.module === 'Consumption' || request.recordType === 'consumption') {
+          // Fetch consumption data
+          const consumption = await api.consumption.getById(request.recordId);
+          newData = {
+            userId: consumption.userId,
+            billMonth: consumption.billMonth,
+            currentReading: consumption.currentReading,
+            previousReading: consumption.previousReading,
+            consumption: consumption.consumption,
+          };
+        } else if (request.module === 'ZoneScoring' || request.recordType === 'zone-scoring') {
+          // Fetch zone scoring ruleset data
+          const ruleset = await api.zoneScoring.getById(request.recordId);
+          newData = {
+            title: ruleset.title,
+            description: ruleset.description || '',
+            status: ruleset.status,
+            effectiveFrom: ruleset.effectiveFrom || '',
+            createdAt: ruleset.createdAt,
+            updatedAt: ruleset.updatedAt,
+            scoringParams: ruleset.scoringParams?.map((param) => ({
+              areaId: param.areaId,
+              areaName: param.area?.name || `Area ${param.areaId}`,
+              landHomeRate: param.landHomeRate,
+              landHomeRatePercentage: param.landHomeRatePercentage,
+              landRate: param.landRate,
+              landRatePercentage: param.landRatePercentage,
+              landTaxRate: param.landTaxRate,
+              landTaxRatePercentage: param.landTaxRatePercentage,
+              buildingTaxRateUpto120sqm: param.buildingTaxRateUpto120sqm,
+              buildingTaxRateUpto120sqmPercentage: param.buildingTaxRateUpto120sqmPercentage,
+              buildingTaxRateUpto200sqm: param.buildingTaxRateUpto200sqm,
+              buildingTaxRateUpto200sqmPercentage: param.buildingTaxRateUpto200sqmPercentage,
+              buildingTaxRateAbove200sqm: param.buildingTaxRateAbove200sqm,
+              buildingTaxRateAbove200sqmPercentage: param.buildingTaxRateAbove200sqmPercentage,
+              highIncomeGroupConnectionPercentage: param.highIncomeGroupConnectionPercentage,
+              geoMean: param.geoMean,
+            })) || [],
+            totalParameters: ruleset.scoringParams?.length || 0,
+          };
+        } else if (request.module === 'Customer' || request.recordType === 'customer') {
+          // Fetch full customer data to ensure we have all fields including meter data
+          if (request.account) {
+            try {
+              // Try to fetch user by account UUID (the backend supports this via /users/{account}/status, so might support GET too)
+              // If that fails, fall back to using existing data
+              const authToken = localStorage.getItem('authToken');
+              const baseUrl = import.meta.env.VITE_API_BASE_URL || 'https://water-tariff-backend.onrender.com';
+              const response = await fetch(`${baseUrl}/users/${request.account}`, {
+                headers: {
+                  'Authorization': `Bearer ${authToken || ''}`,
+                  'Content-Type': 'application/json'
+                }
+              });
+              
+              if (response.ok) {
+                const userData = await response.json();
+                const user = userData.data || userData;
+                const customer = mapUserToCustomer(user);
+                
+                // Get zone from area
+                let zoneId = customer.zoneId;
+                if (!zoneId && customer.areaId) {
+                  const area = (allAreas as Area[]).find((a) => a.id === customer.areaId);
+                  if (area) {
+                    zoneId = (area as any).zone?.id || area.zoneId;
+                  }
+                }
+                
+                // Get meter data from meters table by matching account UUID
+                const userMeter = (allMeters as Meter[]).find((m: Meter) => {
+                  const meterAccount = (m as any).account || m.userAccount || (m as any).user_account;
+                  return meterAccount === request.account || meterAccount === String(request.account);
+                });
+                
+                // Extract meter data from matched meter
+                const meterNo = userMeter?.meterNo || '';
+                const meterStatus = userMeter?.meterStatus || '';
+                const sizeOfDia = userMeter?.sizeOfDia || '';
+                const meterInstallationDate = userMeter?.meterInstallationDate || '';
+                
+                newData = {
+                  name: customer.name || customer.fullName,
+                  address: customer.address,
+                  inspCode: customer.inspCode,
+                  accountType: customer.accountType,
+                  customerCategory: customer.customerCategory,
+                  waterStatus: customer.waterStatus,
+                  sewerStatus: customer.sewerStatus,
+                  areaId: customer.areaId,
+                  zoneId: zoneId || undefined,
+                  // Include meter fields if they have values
+                  ...(meterNo && { meterNo: typeof meterNo === 'number' ? meterNo.toString() : String(meterNo) }),
+                  ...(meterStatus && { meterStatus }),
+                  ...(sizeOfDia && { sizeOfDia }),
+                  ...(meterInstallationDate && { meterInstallationDate }),
+                };
+              } else {
+                // If fetch fails, use existing data but enhance it
+                throw new Error('Failed to fetch user');
+              }
+            } catch (error) {
+              console.error('Failed to fetch customer details, using existing data:', error);
+              // Fallback to existing newData but try to enhance it with meter lookup
+              const existingData: Record<string, any> = (request.newData as Record<string, any>) || {};
+              
+              // If zoneId is missing, try to get it from area
+              if (!existingData.zoneId && existingData.areaId) {
+                const area = (allAreas as Area[]).find((a) => a.id === existingData.areaId);
+                if (area) {
+                  existingData.zoneId = (area as any).zone?.id || area.zoneId;
+                }
+              }
+              
+              // Try to get meter data from meters table
+              if (request.account) {
+                const userMeter = (allMeters as Meter[]).find((m: Meter) => {
+                  const meterAccount = (m as any).account || m.userAccount || (m as any).user_account;
+                  return meterAccount === request.account || meterAccount === String(request.account);
+                });
+                
+                if (userMeter) {
+                  if (!existingData.meterNo && userMeter.meterNo) {
+                    existingData.meterNo = typeof userMeter.meterNo === 'number' ? userMeter.meterNo.toString() : String(userMeter.meterNo);
+                  }
+                  if (!existingData.meterStatus && userMeter.meterStatus) {
+                    existingData.meterStatus = userMeter.meterStatus;
+                  }
+                  if (!existingData.sizeOfDia && userMeter.sizeOfDia) {
+                    existingData.sizeOfDia = userMeter.sizeOfDia;
+                  }
+                  if (!existingData.meterInstallationDate && userMeter.meterInstallationDate) {
+                    existingData.meterInstallationDate = userMeter.meterInstallationDate;
+                  }
+                }
+              }
+              
+              newData = existingData;
+            }
+          } else {
+            // Use existing newData but enhance it
+            const existingData: Record<string, any> = (request.newData as Record<string, any>) || {};
+            
+            // If zoneId is missing, try to get it from area
+            if (!existingData.zoneId && existingData.areaId) {
+              const area = (allAreas as Area[]).find((a) => a.id === existingData.areaId);
+              if (area) {
+                existingData.zoneId = (area as any).zone?.id || area.zoneId;
+              }
+            }
+            
+            newData = existingData;
+          }
+        }
+        
+        // Update request with fetched data, preserving the original request timestamp
+        setSelectedRequest({
+          ...request,
+          oldData: null,
+          newData: newData,
+          // Preserve the original request timestamp
+          request: request.request,
+        });
+      } catch (error) {
+        console.error('Failed to fetch record data:', error);
+        toast.error('Failed to load record data');
+        // Still show modal with existing data, preserving timestamp
+        setSelectedRequest({
+          ...request,
+          request: request.request, // Preserve timestamp
+        });
+      } finally {
+        setIsLoadingRecordData(false);
+      }
+    } else {
+      // Data already available, just set the request with preserved timestamp
+      setSelectedRequest({
+        ...request,
+        request: request.request, // Preserve timestamp
+      });
+    }
+  };
+
+  const handleCloseModal = () => {
+    setSelectedRequest(null);
+  };
+
+  const handleApprove = async (request: ApprovalQueueItem) => {
+    if (!adminId) {
+      console.error('Admin ID not found');
+      return;
+    }
+
+    try {
+      if (request.recordType === 'zone-scoring') {
+        // Use publish endpoint for ZoneScoring approval
+        await api.zoneScoring.publish(request.recordId);
+      } else if (request.recordType === 'consumption') {
+        // Approve consumption
+        await approveConsumptionMutation.mutateAsync({
+          id: request.recordId,
+        });
+        // Create water bill for this user from the approved consumption (API: POST /water-bills/user/{account} with { consumptionId })
+        if (request.account) {
+          try {
+            await api.waterBills.create(request.account, request.recordId);
+            toast.success('Consumption approved and bill generated.');
+          } catch (billError) {
+            const msg = billError instanceof Error ? billError.message : String(billError);
+            if (msg.includes('already exists') || msg.includes('Water bill already exists')) {
+              toast.success('Consumption approved. A bill already exists for this reading.');
+            } else {
+              console.error('Consumption approved but bill creation failed:', billError);
+              toast.warning('Consumption approved, but bill could not be generated. You may create the bill manually.');
+            }
+          }
+        } else {
+          toast.warning('Consumption approved, but customer account was missing so no bill was generated.');
+        }
+      } else if (request.recordType === 'customer') {
+        if (!request.account) {
+          throw new Error('Customer account UUID not found');
+        }
+        // Backend approve/reject only work when status is Pending; new customers are Draft → submit first
+        try {
+          await api.users.submitForApproval(request.account);
+        } catch (_) {
+          // Already Pending or other; continue to approve
+        }
+        await api.users.approve(request.account);
+        toast.success('Customer approved successfully');
+      }
+      
+      // Invalidate and refetch all related queries to ensure UI updates immediately
+      if (request.recordType === 'zone-scoring') {
+        // For ZoneScoring, invalidate zone-scoring and zone scores (map uses zone-scoring-scores)
+        await Promise.all([
+          queryClient.invalidateQueries({ queryKey: ['zone-scoring'], refetchType: 'active' }),
+          queryClient.invalidateQueries({ queryKey: ['zone-scoring-scores'], refetchType: 'active' }),
+        ]);
+        await Promise.all([
+          queryClient.refetchQueries({ queryKey: ['zone-scoring'] }),
+          queryClient.refetchQueries({ queryKey: ['zone-scoring-scores'] }),
+        ]);
+      } else if (request.recordType === 'consumption') {
+        // For consumptions, invalidate consumption and water-bills
+        await Promise.all([
+          queryClient.invalidateQueries({ queryKey: ['consumption'], refetchType: 'active' }),
+          queryClient.invalidateQueries({ queryKey: ['water-bills'], refetchType: 'active' }),
+        ]);
+        await Promise.all([
+          queryClient.refetchQueries({ queryKey: ['consumption'] }),
+          queryClient.refetchQueries({ queryKey: ['water-bills'] }),
+        ]);
+      } else if (request.recordType === 'customer') {
+        // For customers, invalidate users queries
+        await Promise.all([
+          queryClient.invalidateQueries({ queryKey: ['users'], refetchType: 'active' }),
+        ]);
+        await Promise.all([
+          queryClient.refetchQueries({ queryKey: ['users'] }),
+        ]);
+      }
+      
+      setSelectedRequest(null);
+    } catch (error) {
+      console.error('Failed to approve:', error);
+      const errorMessage = error instanceof Error ? error.message : 'Failed to approve';
+      toast.error(`Failed to approve: ${errorMessage}`);
+    }
+  };
+
+  const handleReject = async (request: ApprovalQueueItem) => {
+    if (!adminId) {
+      console.error('Admin ID not found');
+      toast.error('Admin ID not found. Please refresh and try again.');
+      return;
+    }
+
+    if (!request) {
+      console.error('Request is null or undefined');
+      toast.error('Invalid request. Please try again.');
+      return;
+    }
+
+    // Capture request data to prevent stale closures
+    const requestToReject = { ...request };
+    const recordId = requestToReject.recordId;
+    const recordType = requestToReject.recordType;
+
+    try {
+      // Execute mutations first (wait for completion)
+      if (recordType === 'zone-scoring') {
+        // Use status endpoint with 'rejected' for ZoneScoring rejection
+        await api.zoneScoring.updateStatus(recordId, 'rejected');
+      } else if (recordType === 'consumption') {
+        // Reject consumption
+        await rejectConsumptionMutation.mutateAsync({
+          id: recordId,
+        });
+      } else if (recordType === 'customer') {
+        if (!requestToReject.account) {
+          throw new Error('Customer account UUID not found');
+        }
+        // Backend reject only works when status is Pending; new customers are Draft → submit first
+        try {
+          await api.users.submitForApproval(requestToReject.account);
+        } catch (_) {
+          // Already Pending or other; continue to reject
+        }
+        await api.users.reject(requestToReject.account);
+        toast.success('Customer rejected');
+      }
+      
+      // Close modal after successful rejection
+      setSelectedRequest(null);
+      
+      // Invalidate and refetch queries based on record type
+      if (recordType === 'zone-scoring') {
+        // For ZoneScoring, invalidate zone-scoring and zone scores (map uses zone-scoring-scores)
+        await Promise.all([
+          queryClient.invalidateQueries({ queryKey: ['zone-scoring'], refetchType: 'active' }),
+          queryClient.invalidateQueries({ queryKey: ['zone-scoring-scores'], refetchType: 'active' }),
+        ]);
+        await Promise.all([
+          queryClient.refetchQueries({ queryKey: ['zone-scoring'] }),
+          queryClient.refetchQueries({ queryKey: ['zone-scoring-scores'] }),
+        ]);
+      } else if (recordType === 'consumption') {
+        // Wait for backend to fully process
+        await new Promise(resolve => setTimeout(resolve, 500));
+        // Force refetch of consumption queries
+        await Promise.all([
+          queryClient.refetchQueries({ 
+            queryKey: ['consumption'],
+            type: 'active'
+          }),
+        ]);
+      } else if (recordType === 'customer') {
+        // For customers, invalidate users queries
+        await Promise.all([
+          queryClient.invalidateQueries({ queryKey: ['users'], refetchType: 'active' }),
+        ]);
+        await Promise.all([
+          queryClient.refetchQueries({ queryKey: ['users'] }),
+        ]);
+      }
+    } catch (error) {
+      console.error('Failed to reject:', error);
+      
+      // Check if error is due to already-rejected request
+      const errorMessage = error instanceof Error ? error.message : String(error);
+      const isAlreadyRejected = errorMessage.includes('Only pending requests can be reviewed') ||
+                                errorMessage.includes('already reviewed');
+      
+      if (!isAlreadyRejected) {
+        // Only show error toast if it's not an "already rejected" error
+        toast.error('Failed to reject request. Please try again.');
+        // Keep modal open on error so user can try again
+      } else {
+        // If already rejected, close modal and refresh
+        setSelectedRequest(null);
+        await queryClient.invalidateQueries({ queryKey: ['users', 'pending'] });
+      }
+    }
+  };
+
+  if (isLoading) {
+    return (
+      <div className="min-h-screen bg-[#f8f9fb] flex items-center justify-center">
+        <LoadingSpinner />
+      </div>
+    );
+  }
+
+  return (
+    <div className="min-h-screen bg-[#f8f9fb]">
+      <div className="px-4 md:px-8 py-4 md:py-6">
+        {/* Header with inline stats - centered on mobile to avoid hamburger overlap */}
+        <div className="mb-8">
+          <div className="flex flex-col md:flex-row md:items-center md:justify-between gap-4 items-center text-center md:text-left">
+            <div>
+              <h1 className="text-xl md:text-[28px] font-semibold text-gray-900 mb-1 notranslate" translate="no">{t('pages.approvalQueueTitle')}</h1>
+              <p className="text-xs md:text-sm text-gray-500">All pending changes from other admins</p>
+            </div>
+            <div className="flex items-center gap-4 md:gap-6 text-sm flex-wrap justify-center md:justify-start">
+              <div className="flex items-center gap-2">
+                <span className="text-gray-600">Total:</span>
+                <span className="font-semibold text-gray-900">{displayRequests.length}</span>
+              </div>
+              <span className="text-gray-300 hidden sm:inline">|</span>
+              <div className="flex items-center gap-2">
+                <span className="text-gray-600">Pending:</span>
+                <span className="font-semibold text-yellow-600">{displayRequests.length}</span>
+              </div>
+            </div>
+          </div>
+        </div>
+
+        {/* Table */}
+        <div className="bg-white rounded-xl border border-gray-200 overflow-hidden">
+          {/* Mobile: Horizontal scroll wrapper */}
+          <div className="overflow-x-auto -mx-4 md:mx-0">
+            <div className="inline-block min-w-full align-middle px-4 md:px-0">
+              <Table>
+                <TableHeader>
+                  <TableRow className="border-gray-200 bg-gray-50 hover:bg-gray-50">
+                    <TableHead className="font-semibold text-gray-700 min-w-[100px]">Module</TableHead>
+                    <TableHead className="font-semibold text-gray-700 min-w-[150px]">Details</TableHead>
+                    <TableHead className="font-semibold text-gray-700 min-w-[120px] hidden sm:table-cell">Requested By</TableHead>
+                    <TableHead className="font-semibold text-gray-700 min-w-[100px]">Date</TableHead>
+                    <TableHead className="font-semibold text-gray-700 text-right min-w-[100px]">Action</TableHead>
+                  </TableRow>
+                </TableHeader>
+                <TableBody>
+                  {displayRequests.length === 0 ? (
+                    <TableRow>
+                      <TableCell colSpan={5} className="text-center py-8 text-gray-500">
+                        No pending approval requests
+                      </TableCell>
+                    </TableRow>
+                  ) : (
+                    displayRequests.map((request) => (
+                      <TableRow key={request.id} className="border-gray-100">
+                        <TableCell className="font-medium text-gray-900 whitespace-nowrap">{request.module}</TableCell>
+                        <TableCell className="text-gray-700">
+                          <div className="max-w-[200px] md:max-w-none truncate md:whitespace-normal" title={request.details || '-'}>
+                            {request.details || '-'}
+                          </div>
+                        </TableCell>
+                        <TableCell className="text-gray-600 text-sm hidden sm:table-cell whitespace-nowrap">
+                          <div className="max-w-[120px] truncate" title={request.requestedBy}>
+                            {request.requestedBy}
+                          </div>
+                        </TableCell>
+                        <TableCell className="text-gray-600 text-sm whitespace-nowrap">
+                          {request.request && request.request !== 'N/A' ? (
+                            <span>
+                              {new Date(request.request).toLocaleDateString('en-US', {
+                                month: 'short',
+                                day: 'numeric',
+                                year: 'numeric',
+                              })}
+                            </span>
+                          ) : (
+                            '-'
+                          )}
+                        </TableCell>
+                        <TableCell className="text-right">
+                          <Button
+                            onClick={() => handleReview(request)}
+                            className="bg-[#4C6EF5] hover:bg-[#3B5EE5] text-white rounded-lg h-9 px-3 md:px-4 flex items-center gap-1 md:gap-2 ml-auto text-sm whitespace-nowrap"
+                            disabled={
+                              approveConsumptionMutation.isPending ||
+                              rejectConsumptionMutation.isPending
+                            }
+                          >
+                            <Eye size={14} className="md:w-4 md:h-4" />
+                            <span className="hidden sm:inline">Review</span>
+                          </Button>
+                        </TableCell>
+                      </TableRow>
+                    ))
+                  )}
+                </TableBody>
+              </Table>
+            </div>
+          </div>
+        </div>
+      </div>
+
+      {/* Review Modal */}
+      {selectedRequest && (
+        <ReviewChangeModal
+          request={{
+            id: selectedRequest.id,
+            module: selectedRequest.module,
+            requestedBy: selectedRequest.requestedBy,
+            request: selectedRequest.request,
+            oldData: selectedRequest.oldData,
+            newData: selectedRequest.newData,
+          }}
+          onClose={handleCloseModal}
+          onApprove={(requestId) => {
+            // Find the request by ID and approve it
+            const requestToApprove = selectedRequest;
+            if (requestToApprove && requestToApprove.id === requestId) {
+              handleApprove(requestToApprove);
+            }
+          }}
+          onReject={(requestId) => {
+            // Find the request by ID and reject it
+            const requestToReject = selectedRequest;
+            if (requestToReject && requestToReject.id === requestId) {
+              handleReject(requestToReject);
+            }
+          }}
+          isLoading={isLoadingRecordData}
+        />
+      )}
+    </div>
+  );
+}

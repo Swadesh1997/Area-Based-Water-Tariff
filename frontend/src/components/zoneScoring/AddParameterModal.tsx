@@ -1,0 +1,134 @@
+import { Dialog, DialogContent, DialogHeader, DialogTitle, DialogFooter } from '../ui/dialog';
+import { Button } from '../ui/button';
+import { useState } from 'react';
+import type { Area, CreateScoringParamDto, ScoringParam, Zone, Wasa } from '../../types';
+import { initializeScoringParam } from '../../utils/zoneScoringUtils';
+import { ScoringParameterFormFields } from './ScoringParameterFormFields';
+import { HierarchicalLocationSelector } from '../common/HierarchicalLocationSelector';
+import { useLanguage } from '../../context/LanguageContext';
+import { getStaticTranslation } from '../../constants/staticTranslations';
+
+interface AddParameterModalProps {
+  isOpen: boolean;
+  onClose: () => void;
+  newParam: CreateScoringParamDto;
+  setNewParam: (param: CreateScoringParamDto) => void;
+  areas: Area[];
+  zones?: Zone[];
+  wasas?: Wasa[];
+  onAdd: () => Promise<void>;
+  isPending: boolean;
+  calculatedParams?: ScoringParam[];
+  ruleSetId?: number;
+  /** High-income count per areaId (from GET /users/high); used to set read-only high income when area is selected */
+  highIncomeByAreaId?: Record<number, number>;
+}
+
+export function AddParameterModal({
+  isOpen,
+  onClose,
+  newParam,
+  setNewParam,
+  areas,
+  zones = [],
+  wasas = [],
+  onAdd,
+  isPending,
+  calculatedParams = [],
+  ruleSetId,
+  highIncomeByAreaId = {},
+}: AddParameterModalProps) {
+  const [selectedWasaId, setSelectedWasaId] = useState<string>('');
+  const [selectedZoneId, setSelectedZoneId] = useState<string>('');
+  const [selectedAreaId, setSelectedAreaId] = useState<string>('');
+
+  // Note: zonesForWasa is no longer needed since HierarchicalLocationSelector handles zone filtering internally
+
+  const handleClose = () => {
+    setNewParam(initializeScoringParam());
+    setSelectedWasaId('');
+    setSelectedZoneId('');
+    setSelectedAreaId('');
+    onClose();
+  };
+
+  const handleWasaChange = (value: string) => {
+    setSelectedWasaId(value);
+    setSelectedZoneId(''); // Reset zone when wasa changes
+    setSelectedAreaId(''); // Reset area when wasa changes
+    setNewParam({ ...newParam, areaId: 0 }); // Reset area selection
+  };
+
+  const handleZoneChange = (value: string) => {
+    setSelectedZoneId(value);
+    setSelectedAreaId(''); // Reset area when zone changes
+    setNewParam({ ...newParam, areaId: 0 }); // Reset area selection
+  };
+
+  const handleAreaChange = (value: string) => {
+    setSelectedAreaId(value);
+    const areaId = value ? parseInt(value) : 0;
+    const highIncomeCount = areaId ? (highIncomeByAreaId[areaId] ?? 0) : 0;
+    setNewParam({ ...newParam, areaId, highIncomeGroupConnectionPercentage: highIncomeCount.toString() });
+  };
+
+  const { language } = useLanguage();
+  const t = (key: string) => getStaticTranslation(language, key);
+
+  return (
+    <Dialog open={isOpen} onOpenChange={handleClose}>
+      <DialogContent className="bg-white border border-gray-200 rounded-xl shadow-lg w-full max-w-[calc(100%-2rem)] sm:max-w-4xl max-h-[90vh] flex flex-col p-0 gap-0 notranslate" aria-describedby={undefined} translate="no">
+        <DialogHeader className="flex-shrink-0 px-4 pt-4 pb-3 sm:px-6 sm:pt-6 sm:pb-4">
+          <DialogTitle className="text-lg sm:text-xl font-semibold text-gray-900">
+            {t('modals.addScoringParameter')}
+          </DialogTitle>
+        </DialogHeader>
+        <div className="flex-1 min-h-0 overflow-y-auto px-4 py-3 sm:px-6 sm:py-4 space-y-4">
+          {/* WASA, Zone, and Area Selection */}
+          <HierarchicalLocationSelector
+            wasas={wasas}
+            zones={zones}
+            areas={areas}
+            wasaId={selectedWasaId}
+            zoneId={selectedZoneId}
+            areaId={selectedAreaId}
+            onWasaChange={handleWasaChange}
+            onZoneChange={handleZoneChange}
+            onAreaChange={handleAreaChange}
+            required={true}
+            showArea={true}
+            wasaPlaceholder={t('modals.filterByWasa')}
+            zonePlaceholder={t('modals.filterByZone')}
+            areaPlaceholder={t('modals.selectAnArea')}
+            areaLabel={t('modals.area')}
+          />
+
+          <ScoringParameterFormFields
+            values={newParam}
+            onChange={(field, value) => setNewParam({ ...newParam, [field]: value })}
+            calculatedParams={calculatedParams}
+            showPercentages={true}
+            showReadOnlyFields={true}
+            ruleSetId={ruleSetId}
+          />
+        </div>
+        <DialogFooter className="flex-shrink-0 px-4 pb-4 pt-3 sm:px-6 sm:pb-6 sm:pt-4 border-t border-gray-200">
+          <Button
+            onClick={handleClose}
+            variant="outline"
+            className="border-gray-300 rounded-lg h-10 px-6"
+          >
+            Cancel
+          </Button>
+          <Button
+            onClick={onAdd}
+            disabled={isPending}
+            className="bg-[#4C6EF5] hover:bg-[#3B5EE5] text-white rounded-lg h-10 px-6 disabled:opacity-50"
+          >
+            {isPending ? 'Adding...' : 'Add Parameter'}
+          </Button>
+        </DialogFooter>
+      </DialogContent>
+    </Dialog>
+  );
+}

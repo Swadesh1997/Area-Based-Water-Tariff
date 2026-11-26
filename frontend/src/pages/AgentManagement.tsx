@@ -1,0 +1,348 @@
+import { useLanguage } from "../context/LanguageContext";
+import { getStaticTranslation } from "../constants/staticTranslations";
+import { Button } from "../components/ui/button";
+import {
+    Table,
+    TableBody,
+    TableCell,
+    TableHead,
+    TableHeader,
+    TableRow,
+} from "../components/ui/table";
+import { Edit2, Search } from "lucide-react";
+import { Input } from "../components/ui/input";
+import { useState, useMemo } from "react";
+import { AddAgentModal } from "../components/modals/AddAgentModal";
+import { api } from "../services/api";
+import { useApiQuery, useApiMutation } from "../hooks/useApiQuery";
+import { mapAdminToDisplay, type DisplayAdmin } from "../utils/dataMappers";
+import { LoadingSpinner } from "../components/common/LoadingSpinner";
+import { toast } from "sonner";
+import type { Admin } from "../types";
+
+interface Agent {
+    name: string;
+    phone?: string;
+    email: string;
+    password?: string;
+    confirm?: string;
+    zone?: string;
+    role: string;
+}
+
+interface EditingAgent extends DisplayAdmin {
+    index: number;
+}
+
+export function AgentManagement() {
+    const { language } = useLanguage();
+    const t = (key: string) => getStaticTranslation(language, key);
+    const [searchTerm, setSearchTerm] = useState("");
+    const [showModal, setShowModal] = useState(false);
+    const [editMode, setEditMode] = useState(false);
+    const [editingAgent, setEditingAgent] = useState<EditingAgent | null>(null);
+    
+    // Get current logged-in admin
+    const getCurrentAdmin = (): Admin | null => {
+        const adminStr = localStorage.getItem('admin');
+        if (!adminStr) return null;
+        try {
+            return JSON.parse(adminStr);
+        } catch {
+            return null;
+        }
+    };
+    
+    const currentAdmin = getCurrentAdmin();
+
+    // Calculate if delete button should be shown (only if editing other admin, not self)
+    const shouldShowDeleteButton = useMemo(() => {
+        if (!editMode || !editingAgent || !currentAdmin) return false;
+        return editingAgent.id !== currentAdmin.id;
+    }, [editMode, editingAgent, currentAdmin]);
+
+    // Fetch admins and roles
+    const { data: admins = [], isLoading: adminsLoading } = useApiQuery(
+        ['admins'],
+        () => api.admins.getAll()
+    );
+
+    const { data: roles = [], isLoading: rolesLoading } = useApiQuery(
+        ['roles'],
+        () => api.roles.getAll()
+    );
+
+    // Map admins to display format
+    const displayAdmins = useMemo(() => {
+        return admins.map((admin) => mapAdminToDisplay(admin, roles));
+    }, [admins, roles]);
+
+    // Filter out meter admins (Agent Management is for all other admins, NOT meter admins)
+    const nonMeterAdmins = useMemo(() => {
+        return displayAdmins.filter((admin) => {
+            const roleName = admin.role.toLowerCase();
+            return !roleName.includes('meter');
+        });
+    }, [displayAdmins]);
+
+    // Filter admins by search term
+    const filteredAdmins = useMemo(() => {
+        if (!searchTerm) return nonMeterAdmins;
+        const term = searchTerm.toLowerCase();
+        return nonMeterAdmins.filter(
+            (admin) =>
+                admin.name.toLowerCase().includes(term) ||
+                admin.email.toLowerCase().includes(term) ||
+                admin.role.toLowerCase().includes(term)
+        );
+    }, [nonMeterAdmins, searchTerm]);
+
+    // Create admin mutation
+    const createMutation = useApiMutation(
+        (data: { fullName: string; email: string; phone: string; password: string; roleId: number }) =>
+            api.admins.create(data),
+        {
+            successMessage: 'Agent created successfully',
+            errorMessage: 'Failed to create agent',
+            invalidateQueries: [['admins']],
+        }
+    );
+
+    // Update admin mutation
+    const updateMutation = useApiMutation(
+        ({ id, data }: { id: number; data: { fullName?: string; email?: string; phone?: string } }) =>
+            api.admins.update(id, data),
+        {
+            successMessage: 'Agent updated successfully',
+            errorMessage: 'Failed to update agent',
+            invalidateQueries: [['admins']],
+        }
+    );
+
+    // Delete admin mutation
+    const deleteMutation = useApiMutation(
+        (id: number) => api.admins.delete(id),
+        {
+            successMessage: 'Agent deleted successfully',
+            errorMessage: 'Failed to delete agent',
+            invalidateQueries: [['admins']],
+        }
+    );
+
+    const getRoleBadgeColor = (role: string) => {
+        if (role === "Super Admin") return "bg-purple-50 text-purple-700";
+        if (role === "Tariff Admin") return "bg-blue-50 text-blue-700";
+        if (role === "Customer Admin") return "bg-green-50 text-green-700";
+        return "bg-amber-50 text-amber-700";
+    };
+
+    // Find roleId by role name
+    const getRoleIdByName = (roleName: string): number | null => {
+        const role = roles.find((r) => r.name === roleName);
+        return role?.id || null;
+    };
+
+    const handleAddAgent = async (newAgent: Agent) => {
+        const roleId = getRoleIdByName(newAgent.role);
+        if (!roleId || !newAgent.password) {
+            return;
+        }
+
+        await createMutation.mutateAsync({
+            fullName: newAgent.name,
+            email: newAgent.email,
+            phone: newAgent.phone || '',
+            password: newAgent.password,
+            roleId,
+        });
+        setShowModal(false);
+        setEditMode(false);
+    };
+
+    const handleEditClick = (admin: DisplayAdmin, index: number) => {
+        setEditingAgent({ ...admin, index });
+        setEditMode(true);
+        setShowModal(true);
+    };
+
+    const handleEditSave = async (updatedAgent: Agent) => {
+        if (!editingAgent) return;
+
+        await updateMutation.mutateAsync({
+            id: editingAgent.id,
+            data: {
+                fullName: updatedAgent.name,
+                email: updatedAgent.email,
+                phone: updatedAgent.phone,
+            },
+        });
+        setShowModal(false);
+        setEditMode(false);
+        setEditingAgent(null);
+    };
+
+    const handleModalClose = () => {
+        setShowModal(false);
+        setEditMode(false);
+        setEditingAgent(null);
+    };
+
+    const handleDelete = async () => {
+        if (!editingAgent) return;
+
+        // Recalculate current admin to ensure we have the latest data
+        const currentAdminData = getCurrentAdmin();
+
+        // Prevent admin from deleting themselves
+        if (currentAdminData && editingAgent.id === currentAdminData.id) {
+            toast.error('You cannot delete your own account');
+            return;
+        }
+
+        await deleteMutation.mutateAsync(editingAgent.id);
+        setShowModal(false);
+        setEditMode(false);
+        setEditingAgent(null);
+    };
+
+    // Prepare role options for dropdown (excluding Meter Admin)
+    const roleOptions = useMemo(() => {
+        return roles
+            .filter((role) => !role.name.toLowerCase().includes('meter'))
+            .map((role) => ({
+                value: role.name,
+                label: role.name,
+            }));
+    }, [roles]);
+
+    if (adminsLoading || rolesLoading) {
+        return (
+            <div className="min-h-screen bg-app flex items-center justify-center">
+                <LoadingSpinner />
+            </div>
+        );
+    }
+
+    return (
+        <div className="min-h-screen bg-app">
+            <div className="px-4 md:px-8 py-4 md:py-6">
+                {/* Header - centered on mobile to avoid hamburger overlap */}
+                <div className="flex flex-col sm:flex-row sm:items-center sm:justify-between gap-4 mb-6 md:mb-8 items-center text-center sm:text-left">
+                    <div>
+                        <h1 className="text-xl md:text-[1.75rem] font-semibold text-gray-900 mb-1 notranslate" translate="no">
+                            {t("pages.agentManagementTitle")}
+                        </h1>
+                        <p className="text-xs md:text-sm text-gray-500 notranslate" translate="no">
+                            {t("pages.agentManagementSubtitle")}
+                        </p>
+                    </div>
+                    <Button
+                        className="bg-primary hover:bg-primary-600 text-white px-4 md:px-6 rounded-lg shadow-sm text-sm md:text-base w-full sm:w-auto"
+                        onClick={() => setShowModal(true)}
+                    >
+                        <span className="notranslate" translate="no">+ {t("pages.addNewAgent")}</span>
+                    </Button>
+                </div>
+
+                {/* Search Bar */}
+                <div className="mb-6">
+                    <div className="relative w-full">
+                        <Search
+                            className="absolute left-3 top-1/2 transform -translate-y-1/2 text-gray-400"
+                            size={18}
+                        />
+                        <Input
+                            type="text"
+                            placeholder={t("pages.searchAgents")}
+                            value={searchTerm}
+                            onChange={(e) => setSearchTerm(e.target.value)}
+                            className="pl-10 bg-white border-gray-300 rounded-lg h-11 focus:ring-2 focus:ring-primary/20 focus:border-blue-500"
+                        />
+                    </div>
+                </div>
+
+                {/* Table */}
+                <div className="bg-white rounded-xl border border-gray-200 overflow-hidden overflow-x-auto">
+                    <Table>
+                        <TableHeader>
+                            <TableRow className="border-gray-200 bg-gray-50">
+                                <TableHead className="text-xs md:text-sm font-semibold text-gray-700 whitespace-nowrap notranslate" translate="no">
+                                    {t("pages.fullName")}
+                                </TableHead>
+                                <TableHead className="text-xs md:text-sm font-semibold text-gray-700 whitespace-nowrap notranslate" translate="no">
+                                    {t("common.email")}
+                                </TableHead>
+                                <TableHead className="text-xs md:text-sm font-semibold text-gray-700 whitespace-nowrap notranslate" translate="no">
+                                    {t("common.role")}
+                                </TableHead>
+                                <TableHead className="text-xs md:text-sm font-semibold text-gray-700 whitespace-nowrap notranslate" translate="no">
+                                    {t("common.actions")}
+                                </TableHead>
+                            </TableRow>
+                        </TableHeader>
+                        <TableBody>
+                            {filteredAdmins.length === 0 ? (
+                                <TableRow>
+                                    <TableCell colSpan={4} className="text-center text-gray-500 py-6 md:py-8 text-sm notranslate" translate="no">
+                                        {t("pages.noAgentsFound")}
+                                    </TableCell>
+                                </TableRow>
+                            ) : (
+                                filteredAdmins.map((admin, index) => (
+                                    <TableRow
+                                        key={admin.id}
+                                        className="border-gray-100"
+                                    >
+                                        <TableCell className="text-xs md:text-sm text-gray-900 font-medium whitespace-nowrap">
+                                            {admin.name}
+                                        </TableCell>
+                                        <TableCell className="text-xs md:text-sm text-gray-600 whitespace-nowrap">
+                                            {admin.email}
+                                        </TableCell>
+                                        <TableCell className="whitespace-nowrap">
+                                            <span
+                                                className={`inline-flex items-center px-2 md:px-3 py-1 rounded-full text-xs font-medium ${getRoleBadgeColor(
+                                                    admin.role
+                                                )}`}
+                                            >
+                                                {admin.role}
+                                            </span>
+                                        </TableCell>
+                                        <TableCell className="whitespace-nowrap">
+                                            <Button
+                                                variant="outline"
+                                                size="sm"
+                                                className="border-gray-300 text-gray-700 rounded-lg hover:bg-gray-50 text-xs md:text-sm"
+                                                onClick={() => handleEditClick(admin, index)}
+                                            >
+                                                <Edit2
+                                                    size={14}
+                                                    className="mr-1.5"
+                                                />
+                                                Edit
+                                            </Button>
+                                        </TableCell>
+                                    </TableRow>
+                                ))
+                            )}
+                        </TableBody>
+                    </Table>
+                </div>
+            </div>
+            <AddAgentModal
+                open={showModal}
+                onClose={handleModalClose}
+                onSave={editMode ? handleEditSave : handleAddAgent}
+                editMode={editMode}
+                agent={editingAgent ? {
+                    name: editingAgent.name,
+                    email: editingAgent.email,
+                    phone: editingAgent.phone,
+                    role: editingAgent.role,
+                } : null}
+                onDelete={shouldShowDeleteButton ? handleDelete : undefined}
+                roleOptions={roleOptions}
+            />
+        </div>
+    );
+}

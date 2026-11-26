@@ -1,0 +1,295 @@
+import { Outlet, useLocation, useNavigate } from "react-router-dom";
+import type { ReactNode } from "react";
+import { useState } from "react";
+import { Menu } from "lucide-react";
+import LanguageSwitcher from "./LanguageSwitcher";
+import { useLanguage } from "../../context/LanguageContext";
+import { getStaticTranslation } from "../../constants/staticTranslations";
+import { Sidebar } from "./Sidebar";
+import { MeterReaderSidebar } from "./MeterReaderSidebar";
+import { CustomerAdminSidebar } from "./CustomerAdminSidebar";
+import { TariffAdminSidebar } from "./TariffAdminSidebar";
+import { ApprovalAdminSidebar } from "./ApprovalAdminSidebar";
+import { GeneralAdminSidebar } from "./GeneralAdminSidebar";
+import { Sheet, SheetContent } from "../ui/sheet";
+import { useIsMobile } from "../ui/use-mobile";
+import { getRouteKeyFromRoleName } from "../../utils/roleUtils";
+
+export type LayoutProps = { children?: ReactNode };
+
+export default function Layout({ children }: LayoutProps) {
+  const { pathname } = useLocation();
+  const navigate = useNavigate();
+  const [mobileMenuOpen, setMobileMenuOpen] = useState(false);
+  const isMobile = useIsMobile();
+  const { language } = useLanguage();
+  const t = (key: string) => getStaticTranslation(language, key);
+
+  const adminJson = typeof localStorage !== "undefined" ? localStorage.getItem("admin") : null;
+  const roleKey = adminJson ? getRouteKeyFromRoleName(JSON.parse(adminJson)?.role?.name ?? "") : "";
+  const isTariffMapPage = pathname === "/tariff-admin/map" || pathname.startsWith("/tariff-admin/map/");
+
+  const isMeterAdmin = isTariffMapPage
+    ? roleKey === "meter-admin"
+    : pathname.startsWith("/meter-reader");
+  const isCustomerAdmin = isTariffMapPage
+    ? roleKey === "customer-admin"
+    : pathname.startsWith("/customer-admin");
+  const isTariffAdmin = isTariffMapPage
+    ? roleKey === "tariff-admin"
+    : pathname.startsWith("/tariff-admin");
+  const isApprovalAdmin = isTariffMapPage
+    ? roleKey === "approval-admin"
+    : pathname.startsWith("/approval-admin");
+  const isGeneralInfoAdmin = isTariffMapPage
+    ? roleKey === "general-info"
+    : pathname.startsWith("/general-admin");
+  const isSuperAdmin = isTariffMapPage
+    ? roleKey === "admin"
+    : pathname.startsWith("/admin");
+
+  // meter reader helper
+  const meterActive = isMeterAdmin
+    ? pathname.replace("/meter-reader/", "").replace(/\/.*$/, "")
+    : "";
+
+  const handleMeterNavigate = (id: string) => {
+    if (id === "logout") {
+      localStorage.removeItem("authToken");
+      sessionStorage.clear();
+      navigate("/login");
+      return;
+    }
+    navigate("/meter-reader/" + id.replace(/^meter-reader-/, ""));
+  };
+
+  // customer admin helper
+  const customerActive = isCustomerAdmin
+    ? isTariffMapPage
+      ? "tariff-map"
+      : pathname.replace("/customer-admin/", "").replace(/\/.*$/, "")
+    : "";
+  const customerActivePage = customerActive ? `customer-admin-${customerActive}` : "customer-admin-customers";
+
+  const handleCustomerNavigate = (id: string) => {
+    if (id === "logout") {
+      localStorage.removeItem("authToken");
+      sessionStorage.clear();
+      navigate("/login");
+      return;
+    }
+    const map: Record<string, string> = {
+      "customer-admin-tariff-map": "/tariff-admin/map",
+      "customer-admin-customers": "/customer-admin/customers",
+      "customer-admin-pending": "/customer-admin/pending",
+      "customer-admin-metrics": "/customer-admin/metrics",
+      "customer-admin-billing": "/customer-admin/billing",
+    };
+    const path = map[id] ?? "/customer-admin/customers";
+    navigate(path);
+  };
+
+  // Tariff admin helpers
+  const tariffRouteMap: Record<string, string> = {
+    "tariff-config": "/tariff-admin/config",
+    "tariff-history": "/tariff-admin/history",
+    "zone-scoring": "/tariff-admin/zone-scoring",
+    "location-management": "/tariff-admin/location-management",
+    "tariff-map": "/tariff-admin/map",
+    "my-metrics": "/tariff-admin/metrics",
+  };
+  const tariffActive = isTariffAdmin
+    ? (() => {
+        if (pathname.startsWith("/tariff-admin/zone-scoring")) return "zone-scoring";
+        if (pathname.startsWith("/tariff-admin/location-management")) return "location-management";
+        if (pathname.startsWith("/tariff-admin/map")) return "tariff-map";
+        const match = pathname.match(/^\/tariff-admin\/(\w+)/);
+        if (!match) return "tariff-map";
+        switch (match[1]) {
+          case "config": return "tariff-config";
+          case "history": return "tariff-history";
+          case "metrics": return "my-metrics";
+          case "areas": return "location-management";
+          default: return "tariff-map";
+        }
+      })()
+    : "";
+
+  const handleTariffNavigate = (id: string) => {
+    if (id === "logout") {
+      localStorage.removeItem("authToken");
+      sessionStorage.clear();
+      navigate("/login");
+      return;
+    }
+    const path = tariffRouteMap[id] ?? "/tariff-admin/map";
+    navigate(path);
+  };
+
+  const handleTariffLogout = () => {
+    localStorage.removeItem("authToken");
+    sessionStorage.clear();
+    navigate("/login");
+  };
+
+  // Approval admin helpers
+  const approvalActive = isApprovalAdmin
+    ? (() => {
+        if (isTariffMapPage) return "tariff-map";
+        const match = pathname.match(/^\/approval-admin\/(\w+)/);
+        if (!match) return "approval-queue";
+        switch (match[1]) {
+          case "queue": return "approval-queue";
+          case "history": return "my-history";
+          case "audit": return "system-audit";
+          default: return "approval-queue";
+        }
+      })()
+    : "";
+
+  // General admin helpers
+  const generalInfoActive = isGeneralInfoAdmin
+    ? (() => {
+        if (isTariffMapPage) return "tariff-map";
+        const match = pathname.match(/^\/general-admin\/([^/]+)/);
+        if (!match) return "dashboard";
+        switch (match[1]) {
+          case "dashboard": return "dashboard";
+          case "meter-readers": return "users";
+          case "users": return "users";
+          case "audit": return "audit";
+          default: return "dashboard";
+        }
+      })()
+    : "";
+
+  // Super admin (Sidebar) helpers
+  const superAdminActive = isSuperAdmin
+    ? (() => {
+        if (isTariffMapPage) return "tariff-map";
+        if (pathname.startsWith("/admin/dashboard")) return "dashboard";
+        if (pathname.startsWith("/admin/agents")) return "agents";
+        if (pathname.startsWith("/admin/audit")) return "audit";
+        return "dashboard";
+      })()
+    : "";
+
+  const handleSuperAdminNavigate = (id: string) => {
+    if (id === "logout") {
+      localStorage.removeItem("authToken");
+      sessionStorage.clear();
+      navigate("/login");
+      return;
+    }
+    const routeMap: Record<string, string> = {
+      dashboard: "/admin/dashboard",
+      agents: "/admin/agents",
+      audit: "/admin/audit",
+    };
+    const path = routeMap[id] ?? "/admin/dashboard";
+    navigate(path);
+  };
+
+  /** When provided (e.g. on mobile), called after any sidebar navigation so the sheet can close. */
+  const renderSidebar = (closeOnNavigate?: () => void) => {
+    const close = closeOnNavigate ?? (() => {});
+    if (isMeterAdmin) {
+      return (
+        <MeterReaderSidebar
+          activePage={"meter-reader-" + meterActive}
+          onNavigate={(id) => {
+            handleMeterNavigate(id);
+            close();
+          }}
+        />
+      );
+    }
+    if (isCustomerAdmin) {
+      return (
+        <CustomerAdminSidebar
+          activePage={customerActivePage}
+          onNavigate={(id) => {
+            handleCustomerNavigate(id);
+            close();
+          }}
+        />
+      );
+    }
+    if (isTariffAdmin) {
+      return (
+        <TariffAdminSidebar
+          currentPage={tariffActive}
+          onNavigate={(id) => {
+            handleTariffNavigate(id);
+            close();
+          }}
+          onLogout={handleTariffLogout}
+        />
+      );
+    }
+    if (isApprovalAdmin) {
+      return (
+        <ApprovalAdminSidebar
+          activePage={approvalActive}
+          onNavigate={closeOnNavigate ? () => close() : undefined}
+        />
+      );
+    }
+    if (isGeneralInfoAdmin) {
+      return (
+        <GeneralAdminSidebar
+          activePage={generalInfoActive}
+          onNavigate={closeOnNavigate ? () => close() : undefined}
+        />
+      );
+    }
+    return (
+      <Sidebar
+        activePage={superAdminActive}
+        onNavigate={(id) => {
+          handleSuperAdminNavigate(id);
+          close();
+        }}
+      />
+    );
+  };
+
+  return (
+    <div className="min-h-screen flex">
+      {/* Mobile Menu Button */}
+      {isMobile && (
+        <button
+          onClick={() => setMobileMenuOpen(true)}
+          className="fixed top-4 left-4 z-30 p-2 bg-white rounded-lg shadow-md border border-gray-200 md:hidden"
+          aria-label={t("common.openMenu")}
+        >
+          <Menu size={24} className="text-gray-700" />
+        </button>
+      )}
+
+      {/* Desktop Sidebar */}
+      <aside className="hidden md:block w-[260px] fixed inset-y-0 left-0 bg-white shadow z-20">
+        {renderSidebar()}
+      </aside>
+
+      {/* Mobile Sidebar — close when a tab is selected */}
+      {isMobile && (
+        <Sheet open={mobileMenuOpen} onOpenChange={setMobileMenuOpen}>
+          <SheetContent side="left" className="w-[280px] p-0 bg-white">
+            <div className="h-full overflow-y-auto bg-white">
+              {renderSidebar(() => setMobileMenuOpen(false))}
+            </div>
+          </SheetContent>
+        </Sheet>
+      )}
+
+      {/* Main Content */}
+      <main className="flex-1 w-full md:ml-[260px] px-4 md:px-6 py-4 md:py-6 overflow-x-hidden min-w-0">
+        <div className="sticky top-0 z-10 flex justify-end py-2 -mt-2 mb-2">
+          <LanguageSwitcher />
+        </div>
+        {children ?? <Outlet />}
+      </main>
+    </div>
+  );
+}
